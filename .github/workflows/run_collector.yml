@@ -3,13 +3,13 @@ name: Run Source Collector
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 0 * * 0' # 每周日 UTC 00:00（北京时间 08:00）
+    - cron: '0 0 */3 * *' # 每 3 天 UTC 00:00；GitHub 可能延迟执行
 
 permissions:
   contents: write
 
 jobs:
-  collect-and-validate:
+  collect-and-publish:
     runs-on: ubuntu-latest
 
     steps:
@@ -26,38 +26,34 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Collect and validate sources
+      - name: Collect, filter and de-duplicate sources
         run: python legado_source_collector.py
 
-      - name: Check generated source count
+      - name: Verify valid output is non-empty JSON
         run: |
           python - <<'PY'
           import json
           with open('valid_sources.json', encoding='utf-8') as f:
               sources = json.load(f)
-          if not isinstance(sources, list) or not sources:
-              raise SystemExit('valid_sources.json is empty; refusing to publish')
-          print(f'Validated {len(sources)} importable sources')
+          assert isinstance(sources, list) and len(sources) > 0, 'Refusing to publish empty valid_sources.json'
+          print(f'Ready to publish {len(sources)} sources')
           PY
 
-      - name: Upload generated source files
+      - name: Upload output artifact
         uses: actions/upload-artifact@v4
         with:
           name: sources_output
           path: |
             valid_sources.json
-            pending_sources.json
             invalid_sources.json
           retention-days: 30
 
-      - name: Commit latest files to output branch
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Update output branch
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          mkdir -p /tmp/sources_output
-          cp valid_sources.json pending_sources.json invalid_sources.json /tmp/sources_output/
+          mkdir -p /tmp/legado-output
+          cp valid_sources.json invalid_sources.json /tmp/legado-output/
           git fetch origin
           if git show-ref --verify --quiet refs/remotes/origin/output; then
             git checkout -B output origin/output
@@ -65,8 +61,8 @@ jobs:
             git checkout --orphan output
             git rm -rf . 2>/dev/null || true
           fi
-          rm -f valid_sources.json pending_sources.json invalid_sources.json
-          cp /tmp/sources_output/valid_sources.json /tmp/sources_output/pending_sources.json /tmp/sources_output/invalid_sources.json ./
-          git add valid_sources.json pending_sources.json invalid_sources.json
-          git commit -m "Auto-update sources: $(date -u +%Y-%m-%dT%H:%M:%SZ)" || echo "No changes to commit"
+          rm -f valid_sources.json invalid_sources.json
+          cp /tmp/legado-output/valid_sources.json /tmp/legado-output/invalid_sources.json .
+          git add valid_sources.json invalid_sources.json
+          git commit -m "Auto-update sources: $(date -u +%Y-%m-%dT%H:%M:%SZ)" || echo "No content changes"
           git push origin output
