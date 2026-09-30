@@ -1,4 +1,4 @@
-"""Legado/阅读书源采集、结构校验和去重工具。"""
+"""抓取、校验并整理公开 Legado 书源。"""
 
 import json
 import os
@@ -9,25 +9,15 @@ from urllib.parse import urlsplit, urlunsplit
 
 import requests
 
+# 已验证：该地址返回可导入的 Legado 书源 JSON 数组。
 SOURCE_URLS = [
-    "https://raw.githubusercontent.com/liufuyou/read/main/bangdan.json",
-    "https://raw.githubusercontent.com/XIU2/Yuedu/main/bookSource.json",
-    "https://gitee.com/zoeybai/read/raw/Xiaobai/bangdan.json",
-    "https://raw.githubusercontent.com/cjj200011222/legado-booksource/main/all.json",
+    "https://raw.githubusercontent.com/XIU2/Yuedu/master/shuyuan",
 ]
 
-DOWNLOAD_TIMEOUT_SECONDS = 20
+DOWNLOAD_TIMEOUT_SECONDS = 30
 OUTPUT_VALID = "valid_sources.json"
-OUTPUT_PENDING = "pending_sources.json"
 OUTPUT_INVALID = "invalid_sources.json"
-REQUIRED_FIELDS = (
-    "bookSourceName",
-    "bookSourceUrl",
-    "ruleSearch",
-    "ruleBookInfo",
-    "ruleToc",
-    "ruleContent",
-)
+REQUIRED_RULES = ("ruleSearch", "ruleBookInfo", "ruleToc", "ruleContent")
 
 
 def extract_sources(data: Any) -> list[dict[str, Any]]:
@@ -41,41 +31,31 @@ def extract_sources(data: Any) -> list[dict[str, Any]]:
     return []
 
 
-def fetch_source_list(url: str) -> list[dict[str, Any]]:
-    headers = {"User-Agent": "Mozilla/5.0 LegadoSourceCollector/1.0"}
+def fetch_sources(url: str) -> list[dict[str, Any]]:
+    headers = {
+        "User-Agent": "Mozilla/5.0 (compatible; LegadoSourceCollector/1.0)",
+        "Accept": "application/json,text/plain,*/*",
+    }
     try:
-        response = requests.get(url, timeout=DOWNLOAD_TIMEOUT_SECONDS, headers=headers)
+        response = requests.get(url, headers=headers, timeout=DOWNLOAD_TIMEOUT_SECONDS)
         response.raise_for_status()
-        return extract_sources(response.json())
+        sources = extract_sources(response.json())
+        print(f"[OK] {url}: 获取 {len(sources)} 条")
+        return sources
     except (requests.RequestException, ValueError) as exc:
-        print(f"[WARN] 无法下载或解析 {url}: {exc}")
+        print(f"[WARN] {url}: 获取失败：{exc}")
         return []
 
 
-def load_local_sources(path: str = "local_sources.json") -> list[dict[str, Any]]:
-    if not os.path.exists(path):
-        return []
+def normalize_url(value: str) -> str:
     try:
-        with open(path, "r", encoding="utf-8") as file:
-            return extract_sources(json.load(file))
-    except (OSError, ValueError) as exc:
-        print(f"[WARN] 无法读取本地书源 {path}: {exc}")
-        return []
-
-
-def normalize_url(url: str) -> str:
-    value = url.strip()
-    try:
-        parts = urlsplit(value)
-        scheme = parts.scheme.lower()
-        host = parts.netloc.lower()
-        path = parts.path.rstrip("/") or "/"
-        return urlunsplit((scheme, host, path, parts.query, ""))
+        parts = urlsplit(value.strip())
+        return urlunsplit((parts.scheme.lower(), parts.netloc.lower(), parts.path.rstrip("/") or "/", parts.query, ""))
     except ValueError:
-        return value.rstrip("/").lower()
+        return value.strip().rstrip("/").lower()
 
 
-def has_rule(source: dict[str, Any], field: str) -> bool:
+def rule_present(source: dict[str, Any], field: str) -> bool:
     value = source.get(field)
     if isinstance(value, str):
         return bool(value.strip())
@@ -84,22 +64,20 @@ def has_rule(source: dict[str, Any], field: str) -> bool:
     return value is not None
 
 
-def classify_source(source: dict[str, Any]) -> tuple[str, str]:
+def is_complete_legado_source(source: dict[str, Any]) -> bool:
     name = source.get("bookSourceName")
     url = source.get("bookSourceUrl")
-    if not isinstance(name, str) or not name.strip():
-        return "invalid", "缺少 bookSourceName"
-    if not isinstance(url, str) or not url.strip().startswith(("http://", "https://")):
-        return "invalid", "缺少有效的 bookSourceUrl"
-
-    missing = [field for field in REQUIRED_FIELDS[2:] if not has_rule(source, field)]
-    if not missing:
-        return "valid", "规则完整"
-    return "pending", "缺少规则字段：" + ", ".join(missing)
+    return (
+        isinstance(name, str)
+        and bool(name.strip())
+        and isinstance(url, str)
+        and url.startswith(("http://", "https://"))
+        and all(rule_present(source, field) for field in REQUIRED_RULES)
+    )
 
 
-def score(source: dict[str, Any]) -> int:
-    return sum(has_rule(source, field) for field in REQUIRED_FIELDS[2:])
+def source_score(source: dict[str, Any]) -> int:
+    return sum(rule_present(source, field) for field in REQUIRED_RULES)
 
 
 def deduplicate(sources: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -108,62 +86,50 @@ def deduplicate(sources: list[dict[str, Any]]) -> list[dict[str, Any]]:
         key = normalize_url(str(source.get("bookSourceUrl", "")))
         if not key:
             continue
-        previous = selected.get(key)
-        if previous is None or score(source) > score(previous):
+        old = selected.get(key)
+        if old is None or source_score(source) > source_score(old):
             selected[key] = source
     return list(selected.values())
 
 
-def save_json(path: str, data: list[dict[str, Any]]) -> None:
+def write_json(path: str, content: list[dict[str, Any]]) -> None:
     with open(path, "w", encoding="utf-8") as file:
-        json.dump(data, file, ensure_ascii=False, indent=2)
+        json.dump(content, file, ensure_ascii=False, indent=2)
         file.write("\n")
 
 
 def main() -> None:
-    print("[*] 开始抓取公开 Legado 书源合集")
+    print("[*] 开始抓取公开书源")
     collected: list[dict[str, Any]] = []
     for url in SOURCE_URLS:
-        sources = fetch_source_list(url)
-        print(f"    {url}: {len(sources)} 条")
-        collected.extend(sources)
+        collected.extend(fetch_sources(url))
 
-    local_sources = load_local_sources()
-    if local_sources:
-        print(f"    local_sources.json: {len(local_sources)} 条")
-        collected.extend(local_sources)
+    local_path = "local_sources.json"
+    if os.path.exists(local_path):
+        try:
+            with open(local_path, "r", encoding="utf-8") as file:
+                local = extract_sources(json.load(file))
+            print(f"[OK] {local_path}: 获取 {len(local)} 条")
+            collected.extend(local)
+        except (OSError, ValueError) as exc:
+            print(f"[WARN] {local_path}: 读取失败：{exc}")
 
-    print(f"[*] 抓取总数：{len(collected)}")
-    unique_sources = deduplicate(collected)
-    print(f"[*] URL 去重后：{len(unique_sources)}")
+    print(f"[*] 合并前：{len(collected)} 条")
+    unique = deduplicate(collected)
+    valid = [source for source in unique if is_complete_legado_source(source)]
+    invalid = [source for source in unique if not is_complete_legado_source(source)]
 
-    valid: list[dict[str, Any]] = []
-    pending: list[dict[str, Any]] = []
-    invalid: list[dict[str, Any]] = []
-    for source in unique_sources:
-        state, reason = classify_source(source)
-        source = dict(source)
-        source["_collectorStatus"] = state
-        source["_collectorReason"] = reason
-        if state == "valid":
-            valid.append(source)
-        elif state == "pending":
-            pending.append(source)
-        else:
-            invalid.append(source)
+    write_json(OUTPUT_VALID, valid)
+    write_json(OUTPUT_INVALID, invalid)
 
-    save_json(OUTPUT_VALID, valid)
-    save_json(OUTPUT_PENDING, pending)
-    save_json(OUTPUT_INVALID, invalid)
-
-    generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    print(f"[*] 完成于 {generated_at}")
-    print(f"    有效（完整规则）：{len(valid)}")
-    print(f"    待验证（规则不完整）：{len(pending)}")
-    print(f"    无效（基础字段错误）：{len(invalid)}")
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    print(f"[*] URL 去重后：{len(unique)}")
+    print(f"[*] 有效完整书源：{len(valid)}")
+    print(f"[*] 不完整书源：{len(invalid)}")
+    print(f"[*] 完成于 {now}")
 
     if not valid:
-        print("[ERROR] 没有生成可导入的完整书源；拒绝发布空数组。", file=sys.stderr)
+        print("[ERROR] 未抓到可导入书源，拒绝发布空文件。", file=sys.stderr)
         sys.exit(1)
 
 
