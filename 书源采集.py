@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-书源采集器 - 从用户输入的合集链接批量抓取（带实际可用性测试）
+书源采集器 - 从用户输入的合集链接批量抓取（先去重再测试）
 """
 
 import json
@@ -12,15 +12,11 @@ import ssl
 from datetime import datetime, timezone
 from typing import Any, Dict, List
 
-# ============ 配置 ============
-
 INPUT_FILE = "书源合集列表.txt"
 OUTPUT_DIR = "output"
 VALID_SOURCES_FILE = os.path.join(OUTPUT_DIR, "valid_sources.json")
 REPORT_FILE = os.path.join(OUTPUT_DIR, "report.json")
-SOURCE_TIMEOUT = 10  # 每个书源测试超时（秒）
-
-# ============ 工具函数 ============
+SOURCE_TIMEOUT = 10
 
 def fetch_text(url: str, timeout: int = 30) -> str:
     headers = {"User-Agent": "Mozilla/5.0 LegadoSourceCollector/7.0"}
@@ -55,10 +51,6 @@ def is_legado_source(src: Any) -> bool:
     return has_rule
 
 def test_source_availability(src: Dict[str, Any], timeout: int = 10) -> bool:
-    """
-    快速测试书源网址是否可访问。
-    只检查 HTTP 状态码，不下载完整内容。
-    """
     url = normalize_url(src.get("bookSourceUrl", ""))
     if not url or url.startswith("墨辰整理") or "example.com" in url.lower():
         return False
@@ -94,8 +86,6 @@ def load_input_urls() -> List[str]:
         lines = f.readlines()
     return [line.strip() for line in lines if line.strip() and not line.startswith("#")]
 
-# ============ 主流程 ============
-
 def main():
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     report = {"timestamp": datetime.now(timezone.utc).isoformat(), "collections": [], "final_count": 0, "tested": 0, "passed": 0}
@@ -124,29 +114,27 @@ def main():
             status["error"] = str(e)
         per_url_status.append(status)
     report["collections"] = per_url_status
-    print(f"Loaded {len(all_valid)} sources, starting availability test (10s timeout each)...")
-    tested = []
+    deduped = dedup_sources(all_valid)
+    print(f"Loaded {len(all_valid)} sources, after dedup: {len(deduped)}, testing (10s timeout)...")
     passed = []
-    for i, src in enumerate(all_valid):
+    for i, src in enumerate(deduped):
         if test_source_availability(src, timeout=SOURCE_TIMEOUT):
             passed.append(src)
-        tested.append(src)
         if (i + 1) % 50 == 0:
-            print(f"Tested {i + 1}/{len(all_valid)}, passed: {len(passed)}")
-    report["tested"] = len(tested)
+            print(f"Tested {i + 1}/{len(deduped)}, passed: {len(passed)}")
+    report["tested"] = len(deduped)
     report["passed"] = len(passed)
-    deduped = dedup_sources(passed)
-    report["final_count"] = len(deduped)
-    if len(deduped) == 0:
+    report["final_count"] = len(passed)
+    if len(passed) == 0:
         print("No valid sources after test, keeping old files.")
         with open(REPORT_FILE, "w", encoding="utf-8") as f:
             json.dump(report, f, ensure_ascii=False, indent=2)
         return
     with open(VALID_SOURCES_FILE, "w", encoding="utf-8") as f:
-        json.dump(deduped, f, ensure_ascii=False, indent=2)
+        json.dump(passed, f, ensure_ascii=False, indent=2)
     with open(REPORT_FILE, "w", encoding="utf-8") as f:
         json.dump(report, f, ensure_ascii=False, indent=2)
-    print(f"Tested: {len(tested)}, Passed: {len(passed)}, After dedup: {len(deduped)}")
+    print(f"Tested: {len(deduped)}, Passed: {len(passed)}")
 
 if __name__ == "__main__":
     main()
