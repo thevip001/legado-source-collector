@@ -1,197 +1,171 @@
-"""
-Legado/阅读 APP 书源抓取 + 去重 + 校验工具
-功能：
-1. 从多个公开书源地址批量下载书源 JSON
-2. 合并并去重（按 bookSourceUrl + bookSourceName）
-3. 并发校验书源可用性（检查书源 URL 是否可访问）
-4. 输出有效书源和无效书源到两个 JSON 文件
-
-使用前：
-- 安装 Python 3.8+
-- 安装依赖：pip install requests aiohttp
-- 将本脚本放在一个空目录中运行
-"""
+"""Legado/阅读书源采集、结构校验和去重工具。"""
 
 import json
 import os
-import asyncio
-import aiohttp
-from typing import List, Dict, Any
-from datetime import datetime
+import sys
+from datetime import datetime, timezone
+from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
-# ==================== 配置区 ====================
+import requests
 
-# 公开书源合集地址（可以自行增删）
 SOURCE_URLS = [
     "https://raw.githubusercontent.com/liufuyou/read/main/bangdan.json",
     "https://raw.githubusercontent.com/XIU2/Yuedu/main/bookSource.json",
     "https://gitee.com/zoeybai/read/raw/Xiaobai/bangdan.json",
     "https://raw.githubusercontent.com/cjj200011222/legado-booksource/main/all.json",
-    # 可以在此添加更多书源地址
 ]
 
-# 测试关键词（用于后续可扩展的搜索校验）
-TEST_KEYWORD = "系统"
-
-# 并发数（根据网络情况调整，一般 10-50）
-MAX_CONCURRENT = 20
-
-# 单个书源请求超时时间（秒）
-TIMEOUT_SECONDS = 5
-
-# 输出文件名
+DOWNLOAD_TIMEOUT_SECONDS = 20
 OUTPUT_VALID = "valid_sources.json"
+OUTPUT_PENDING = "pending_sources.json"
 OUTPUT_INVALID = "invalid_sources.json"
+REQUIRED_FIELDS = (
+    "bookSourceName",
+    "bookSourceUrl",
+    "ruleSearch",
+    "ruleBookInfo",
+    "ruleToc",
+    "ruleContent",
+)
 
-# ==================== 工具函数 ====================
 
-def load_sources_from_url(url: str) -> List[Dict[str, Any]]:
-    """从 URL 加载书源列表"""
-    import requests
-    try:
-        resp = requests.get(url, timeout=10)
-        resp.raise_for_status()
-        data = resp.json()
-        # 有些合集是直接列表，有些是 {"bookSources": [...]} 结构
-        if isinstance(data, list):
-            return data
-        elif isinstance(data, dict):
-            for key in ["bookSources", "sources", "data"]:
-                if key in data and isinstance(data[key], list):
-                    return data[key]
-        return []
-    except Exception as e:
-        print(f"[!] 加载书源失败 {url}: {e}")
-        return []
-
-def deduplicate_sources(sources: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """
-    去重策略：
-    - 优先使用 bookSourceUrl + bookSourceName 作为唯一键
-    - 如果没有 bookSourceUrl，则用 bookSourceName
-    """
-    seen = set()
-    result = []
-    for src in sources:
-        url = src.get("bookSourceUrl", "")
-        name = src.get("bookSourceName", "")
-        key = f"{url}||{name}" if url else name
-        if key not in seen:
-            seen.add(key)
-            result.append(src)
-    return result
-
-async def check_source_available(
-    session: aiohttp.ClientSession,
-    source: Dict[str, Any],
-    semaphore: asyncio.Semaphore
-) -> tuple[Dict[str, Any], bool]:
-    """
-    校验书源是否可用：
-    - 尝试访问 bookSourceUrl（如果有）
-    - 如果无法访问或超时，则标记为无效
-    返回：(书源，是否有效)
-    """
-    async with semaphore:
-        url = source.get("bookSourceUrl", "")
-        if not url:
-            # 没有 URL 的书源，暂时认为无效
-            return source, False
-
-        try:
-            # 只检查 URL 是否可访问，不深入搜索
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=TIMEOUT_SECONDS)) as resp:
-                if resp.status < 400:
-                    return source, True
-                else:
-                    return source, False
-        except Exception:
-            return source, False
-
-async def validate_sources(sources: List[Dict[str, Any]]) -> tuple[List[Dict], List[Dict]]:
-    """并发校验所有书源"""
-    connector = aiohttp.TCPConnector(limit=MAX_CONCURRENT, ssl=False)
-    async with aiohttp.ClientSession(connector=connector) as session:
-        semaphore = asyncio.Semaphore(MAX_CONCURRENT)
-        tasks = [check_source_available(session, src, semaphore) for src in sources]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-
-    valid = []
-    invalid = []
-    for res in results:
-        if isinstance(res, Exception):
-            # 异常也视为无效
-            continue
-        src, is_ok = res
-        if is_ok:
-            valid.append(src)
-        else:
-            invalid.append(src)
-
-    return valid, invalid
-
-def save_json(data: List[Dict], filename: str):
-    with open(filename, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
-def load_local_sources(filename: str) -> List[Dict[str, Any]]:
-    """加载本地书源文件（可选）"""
-    if not os.path.exists(filename):
-        return []
-    with open(filename, "r", encoding="utf-8") as f:
-        data = json.load(f)
-        if isinstance(data, list):
-            return data
-        elif isinstance(data, dict):
-            for key in ["bookSources", "sources", "data"]:
-                if key in data and isinstance(data[key], list):
-                    return data[key]
+def extract_sources(data: Any) -> list[dict[str, Any]]:
+    if isinstance(data, list):
+        return [item for item in data if isinstance(item, dict)]
+    if isinstance(data, dict):
+        for key in ("bookSources", "sources", "data"):
+            value = data.get(key)
+            if isinstance(value, list):
+                return [item for item in value if isinstance(item, dict)]
     return []
 
-# ==================== 主流程 ====================
 
-async def main():
-    print("[*] 开始抓取网络书源...")
-    all_sources: List[Dict[str, Any]] = []
+def fetch_source_list(url: str) -> list[dict[str, Any]]:
+    headers = {"User-Agent": "Mozilla/5.0 LegadoSourceCollector/1.0"}
+    try:
+        response = requests.get(url, timeout=DOWNLOAD_TIMEOUT_SECONDS, headers=headers)
+        response.raise_for_status()
+        return extract_sources(response.json())
+    except (requests.RequestException, ValueError) as exc:
+        print(f"[WARN] 无法下载或解析 {url}: {exc}")
+        return []
 
-    # 1. 从网络抓取
+
+def load_local_sources(path: str = "local_sources.json") -> list[dict[str, Any]]:
+    if not os.path.exists(path):
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as file:
+            return extract_sources(json.load(file))
+    except (OSError, ValueError) as exc:
+        print(f"[WARN] 无法读取本地书源 {path}: {exc}")
+        return []
+
+
+def normalize_url(url: str) -> str:
+    value = url.strip()
+    try:
+        parts = urlsplit(value)
+        scheme = parts.scheme.lower()
+        host = parts.netloc.lower()
+        path = parts.path.rstrip("/") or "/"
+        return urlunsplit((scheme, host, path, parts.query, ""))
+    except ValueError:
+        return value.rstrip("/").lower()
+
+
+def has_rule(source: dict[str, Any], field: str) -> bool:
+    value = source.get(field)
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, dict):
+        return any(bool(str(item).strip()) for item in value.values())
+    return value is not None
+
+
+def classify_source(source: dict[str, Any]) -> tuple[str, str]:
+    name = source.get("bookSourceName")
+    url = source.get("bookSourceUrl")
+    if not isinstance(name, str) or not name.strip():
+        return "invalid", "缺少 bookSourceName"
+    if not isinstance(url, str) or not url.strip().startswith(("http://", "https://")):
+        return "invalid", "缺少有效的 bookSourceUrl"
+
+    missing = [field for field in REQUIRED_FIELDS[2:] if not has_rule(source, field)]
+    if not missing:
+        return "valid", "规则完整"
+    return "pending", "缺少规则字段：" + ", ".join(missing)
+
+
+def score(source: dict[str, Any]) -> int:
+    return sum(has_rule(source, field) for field in REQUIRED_FIELDS[2:])
+
+
+def deduplicate(sources: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    selected: dict[str, dict[str, Any]] = {}
+    for source in sources:
+        key = normalize_url(str(source.get("bookSourceUrl", "")))
+        if not key:
+            continue
+        previous = selected.get(key)
+        if previous is None or score(source) > score(previous):
+            selected[key] = source
+    return list(selected.values())
+
+
+def save_json(path: str, data: list[dict[str, Any]]) -> None:
+    with open(path, "w", encoding="utf-8") as file:
+        json.dump(data, file, ensure_ascii=False, indent=2)
+        file.write("\n")
+
+
+def main() -> None:
+    print("[*] 开始抓取公开 Legado 书源合集")
+    collected: list[dict[str, Any]] = []
     for url in SOURCE_URLS:
-        print(f"    下载：{url}")
-        sources = load_sources_from_url(url)
-        print(f"    获得 {len(sources)} 条书源")
-        all_sources.extend(sources)
+        sources = fetch_source_list(url)
+        print(f"    {url}: {len(sources)} 条")
+        collected.extend(sources)
 
-    # 2. 可选：加载本地额外书源
-    local_file = "local_sources.json"
-    if os.path.exists(local_file):
-        print(f"[*] 加载本地书源：{local_file}")
-        local_sources = load_local_sources(local_file)
-        all_sources.extend(local_sources)
+    local_sources = load_local_sources()
+    if local_sources:
+        print(f"    local_sources.json: {len(local_sources)} 条")
+        collected.extend(local_sources)
 
-    print(f"[*] 合并后总数：{len(all_sources)} 条")
+    print(f"[*] 抓取总数：{len(collected)}")
+    unique_sources = deduplicate(collected)
+    print(f"[*] URL 去重后：{len(unique_sources)}")
 
-    # 3. 去重
-    print("[*] 开始去重...")
-    deduped = deduplicate_sources(all_sources)
-    print(f"[*] 去重后数量：{len(deduped)} 条")
+    valid: list[dict[str, Any]] = []
+    pending: list[dict[str, Any]] = []
+    invalid: list[dict[str, Any]] = []
+    for source in unique_sources:
+        state, reason = classify_source(source)
+        source = dict(source)
+        source["_collectorStatus"] = state
+        source["_collectorReason"] = reason
+        if state == "valid":
+            valid.append(source)
+        elif state == "pending":
+            pending.append(source)
+        else:
+            invalid.append(source)
 
-    # 4. 校验
-    print(f"[*] 开始校验书源（并发数={MAX_CONCURRENT}, 超时={TIMEOUT_SECONDS}s）...")
-    valid, invalid = await validate_sources(deduped)
+    save_json(OUTPUT_VALID, valid)
+    save_json(OUTPUT_PENDING, pending)
+    save_json(OUTPUT_INVALID, invalid)
 
-    print(f"[*] 校验完成：")
-    print(f"    有效书源：{len(valid)} 条")
-    print(f"    无效书源：{len(invalid)} 条")
+    generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    print(f"[*] 完成于 {generated_at}")
+    print(f"    有效（完整规则）：{len(valid)}")
+    print(f"    待验证（规则不完整）：{len(pending)}")
+    print(f"    无效（基础字段错误）：{len(invalid)}")
 
-    # 5. 保存结果
-    save_json(valid, OUTPUT_VALID)
-    save_json(invalid, OUTPUT_INVALID)
+    if not valid:
+        print("[ERROR] 没有生成可导入的完整书源；拒绝发布空数组。", file=sys.stderr)
+        sys.exit(1)
 
-    print(f"[*] 结果已保存：")
-    print(f"    有效书源 -> {OUTPUT_VALID}")
-    print(f"    无效书源 -> {OUTPUT_INVALID}")
-    print(f"[*] 完成时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
 if __name__ == "__main__":
-    # 需要安装：pip install requests aiohttp
-    asyncio.run(main())
+    main()
