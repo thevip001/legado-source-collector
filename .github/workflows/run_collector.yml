@@ -2,8 +2,8 @@ name: Run Source Collector
 
 on:
   workflow_dispatch:  # 手动触发
-  # schedule:
-  #   - cron: '0 0 * * 0'  # 可选：每周日 UTC 0 点自动运行
+  schedule:
+    - cron: '0 0 * * 0'  # 每周日 UTC 0 点自动运行
 
 jobs:
   collect-and-validate:
@@ -26,16 +26,27 @@ jobs:
       - name: Run source collector
         run: python legado_source_collector.py
 
-      - name: Upload valid sources
+      - name: Create output directory
+        run: |
+          mkdir -p output
+          cp valid_sources.json output/
+          cp invalid_sources.json output/
+
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: valid_sources
-          path: valid_sources.json
+          name: sources_output
+          path: output/
           retention-days: 30
 
-      - name: Upload invalid sources
-        uses: actions/upload-artifact@v4
-        with:
-          name: invalid_sources
-          path: invalid_sources.json
-          retention-days: 30
+      - name: Commit and push to output branch
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git fetch origin
+          git checkout -B output || git checkout --orphan output
+          git rm -rf . 2>/dev/null || true
+          cp valid_sources.json invalid_sources.json ./
+          git add valid_sources.json invalid_sources.json
+          git commit -m "Auto-update sources: $(date -u +%Y-%m-%d)" || echo "No changes to commit"
+          git push -f origin output
