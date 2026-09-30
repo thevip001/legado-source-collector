@@ -12,7 +12,7 @@ INPUT_FILE = "书源合集列表.txt"
 OUTPUT_DIR = "output"
 VALID_SOURCES_FILE = os.path.join(OUTPUT_DIR, "valid_sources.json")
 REPORT_FILE = os.path.join(OUTPUT_DIR, "report.json")
-SOURCE_TIMEOUT = 10
+SOURCE_TIMEOUT = 5
 
 def fetch_text(url: str, timeout: int = 30) -> str:
     print(f"Fetching: {url}", flush=True)
@@ -47,7 +47,7 @@ def is_legado_source(src: Any) -> bool:
     ])
     return has_rule
 
-def test_source_availability(src: Dict[str, Any], timeout: int = 10) -> bool:
+def test_source_availability(src: Dict[str, Any], timeout: int = 5) -> bool:
     url = normalize_url(src.get("bookSourceUrl", ""))
     if not url or url.startswith("墨辰整理") or "example.com" in url.lower():
         return False
@@ -118,7 +118,7 @@ def main():
     report["collections"] = per_url_status
     print(f"\nTotal: {len(all_valid)} sources, starting dedup...", flush=True)
     deduped = dedup_sources(all_valid)
-    print(f"After dedup: {len(deduped)} sources, starting availability test (10s timeout)...", flush=True)
+    print(f"After dedup: {len(deduped)} sources, starting availability test (5s timeout)...", flush=True)
     passed = []
     for i, src in enumerate(deduped):
         if test_source_availability(src, timeout=SOURCE_TIMEOUT):
