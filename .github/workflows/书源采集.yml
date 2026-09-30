@@ -1,0 +1,61 @@
+name: 书源采集
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Fetch sources
+        run: |
+          python 书源采集.py
+
+      - name: Check result
+        id: check
+        run: |
+          if [ ! -f output/valid_sources.json ]; then
+            echo "skip_deploy=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          COUNT=$(python -c "import json; print(len(json.load(open('output/valid_sources.json'))))")
+          if [ "$COUNT" -eq 0 ]; then
+            echo "skip_deploy=true" >> $GITHUB_OUTPUT
+          else
+            echo "skip_deploy=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Upload artifact
+        if: steps.check.outputs.skip_deploy == 'false'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: ./output
+
+  deploy:
+    needs: fetch
+    if: needs.fetch.outputs.skip_deploy != 'true'
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
