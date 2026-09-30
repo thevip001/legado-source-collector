@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-书源采集器 - 从用户输入的合集链接批量抓取
+书源采集器 - 从用户输入的合集链接批量抓取（带实际可用性测试）
 """
 
 import json
 import os
 import urllib.request
 import urllib.error
+import ssl
 from datetime import datetime, timezone
 from typing import Any, Dict, List
 
@@ -17,11 +18,12 @@ INPUT_FILE = "书源合集列表.txt"
 OUTPUT_DIR = "output"
 VALID_SOURCES_FILE = os.path.join(OUTPUT_DIR, "valid_sources.json")
 REPORT_FILE = os.path.join(OUTPUT_DIR, "report.json")
+SOURCE_TIMEOUT = 10  # 每个书源测试超时（秒）
 
 # ============ 工具函数 ============
 
 def fetch_text(url: str, timeout: int = 30) -> str:
-    headers = {"User-Agent": "Mozilla/5.0 LegadoSourceCollector/6.0"}
+    headers = {"User-Agent": "Mozilla/5.0 LegadoSourceCollector/7.0"}
     req = urllib.request.Request(url, headers=headers)
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         charset = resp.headers.get_content_charset() or "utf-8"
@@ -52,6 +54,26 @@ def is_legado_source(src: Any) -> bool:
     ])
     return has_rule
 
+def test_source_availability(src: Dict[str, Any], timeout: int = 10) -> bool:
+    """
+    快速测试书源网址是否可访问。
+    只检查 HTTP 状态码，不下载完整内容。
+    """
+    url = normalize_url(src.get("bookSourceUrl", ""))
+    if not url or url.startswith("墨辰整理") or "example.com" in url.lower():
+        return False
+    if not (url.startswith("http://") or url.startswith("https://")):
+        return False
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        context = ssl._create_unverified_context()
+        with urllib.request.urlopen(req, timeout=timeout, context=context) as resp:
+            if resp.status == 200:
+                return True
+    except Exception:
+        pass
+    return False
+
 def dedup_sources(sources: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     seen = {}
     result = []
@@ -76,7 +98,7 @@ def load_input_urls() -> List[str]:
 
 def main():
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-    report = {"timestamp": datetime.now(timezone.utc).isoformat(), "collections": [], "final_count": 0}
+    report = {"timestamp": datetime.now(timezone.utc).isoformat(), "collections": [], "final_count": 0, "tested": 0, "passed": 0}
     input_urls = load_input_urls()
     if not input_urls:
         print("No input URLs found in", INPUT_FILE)
@@ -102,10 +124,21 @@ def main():
             status["error"] = str(e)
         per_url_status.append(status)
     report["collections"] = per_url_status
-    deduped = dedup_sources(all_valid)
+    print(f"Loaded {len(all_valid)} sources, starting availability test (10s timeout each)...")
+    tested = []
+    passed = []
+    for i, src in enumerate(all_valid):
+        if test_source_availability(src, timeout=SOURCE_TIMEOUT):
+            passed.append(src)
+        tested.append(src)
+        if (i + 1) % 50 == 0:
+            print(f"Tested {i + 1}/{len(all_valid)}, passed: {len(passed)}")
+    report["tested"] = len(tested)
+    report["passed"] = len(passed)
+    deduped = dedup_sources(passed)
     report["final_count"] = len(deduped)
     if len(deduped) == 0:
-        print("No valid sources fetched, keeping old files.")
+        print("No valid sources after test, keeping old files.")
         with open(REPORT_FILE, "w", encoding="utf-8") as f:
             json.dump(report, f, ensure_ascii=False, indent=2)
         return
@@ -113,9 +146,7 @@ def main():
         json.dump(deduped, f, ensure_ascii=False, indent=2)
     with open(REPORT_FILE, "w", encoding="utf-8") as f:
         json.dump(report, f, ensure_ascii=False, indent=2)
-    print(f"Input URLs: {len(input_urls)}")
-    print(f"Successful: {sum(1 for s in per_url_status if s['success'])}")
-    print(f"Valid after dedup: {len(deduped)}")
+    print(f"Tested: {len(tested)}, Passed: {len(passed)}, After dedup: {len(deduped)}")
 
 if __name__ == "__main__":
     main()
