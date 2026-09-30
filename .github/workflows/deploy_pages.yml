@@ -1,59 +1,66 @@
-name: Deploy to GitHub Pages
+name: Fetch and Publish Legado Sources
 
 on:
-  workflow_run:
-    workflows: ["Run Source Collector"]
-    types: [completed]
-    branches: [main]
+  schedule:
+    # 每 3 天 UTC 00:00 运行
+    - cron: "0 0 */3 * *"
+  workflow_dispatch:
 
 permissions:
-  actions: read
   contents: read
   pages: write
   id-token: write
 
 concurrency:
-  group: pages
+  group: "pages"
   cancel-in-progress: false
 
 jobs:
-  deploy:
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+  fetch-sources:
     runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+
+      - name: Fetch sources
+        run: |
+          python fetch_sources.py
+
+      - name: Check if new sources are non-empty
+        id: check
+        run: |
+          COUNT=$(python -c "import json; print(len(json.load(open('output/valid_sources.json'))))")
+          echo "count=$COUNT" >> $GITHUB_OUTPUT
+          if [ "$COUNT" -eq 0 ]; then
+            echo "No valid sources fetched, skipping deploy."
+            echo "skip_deploy=true" >> $GITHUB_OUTPUT
+          else
+            echo "skip_deploy=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Upload artifact
+        if: steps.check.outputs.skip_deploy == 'false'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: ./output
+
+  deploy:
+    needs: fetch-sources
+    if: needs.fetch-sources.outputs.skip_deploy != 'true'
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
     steps:
-      - name: Download collector artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: sources_output
-          path: site
-          run-id: ${{ github.event.workflow_run.id }}
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Add landing page
-        run: |
-          cat > site/index.html <<'EOF'
-          <!doctype html>
-          <html lang="zh-CN">
-          <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Legado 书源</title></head>
-          <body>
-            <h1>Legado / 阅读 APP 书源</h1>
-            <p><a href="valid_sources.json">下载有效书源（valid_sources.json）</a></p>
-            <p><a href="invalid_sources.json">下载无效书源记录（invalid_sources.json）</a></p>
-          </body>
-          </html>
-          EOF
-
-      - name: Configure Pages
-        uses: actions/configure-pages@v5
-
-      - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: site
-
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
