@@ -26,27 +26,32 @@ jobs:
       - name: Run source collector
         run: python legado_source_collector.py
 
-      - name: Create output directory
-        run: |
-          mkdir -p output
-          cp valid_sources.json output/
-          cp invalid_sources.json output/
-
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: sources_output
-          path: output/
+          path: |
+            valid_sources.json
+            invalid_sources.json
           retention-days: 30
 
       - name: Commit and push to output branch
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          
+          # 保存生成的文件到临时目录
+          mkdir -p /tmp/sources_output
+          cp valid_sources.json invalid_sources.json /tmp/sources_output/
+          
+          # 切换到 output 分支（只保留书源文件）
           git fetch origin
           git checkout -B output || git checkout --orphan output
           git rm -rf . 2>/dev/null || true
-          cp valid_sources.json invalid_sources.json ./
+          
+          # 从临时目录复制回来
+          cp /tmp/sources_output/valid_sources.json /tmp/sources_output/invalid_sources.json ./
+          
           git add valid_sources.json invalid_sources.json
           git commit -m "Auto-update sources: $(date -u +%Y-%m-%d)" || echo "No changes to commit"
           git push -f origin output
