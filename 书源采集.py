@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-书源采集器 - 从用户输入的合集链接批量抓取（先去重再测试）
-"""
-
 import json
 import os
 import urllib.request
@@ -19,6 +15,7 @@ REPORT_FILE = os.path.join(OUTPUT_DIR, "report.json")
 SOURCE_TIMEOUT = 10
 
 def fetch_text(url: str, timeout: int = 30) -> str:
+    print(f"Fetching: {url}", flush=True)
     headers = {"User-Agent": "Mozilla/5.0 LegadoSourceCollector/7.0"}
     req = urllib.request.Request(url, headers=headers)
     with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -90,15 +87,17 @@ def main():
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     report = {"timestamp": datetime.now(timezone.utc).isoformat(), "collections": [], "final_count": 0, "tested": 0, "passed": 0}
     input_urls = load_input_urls()
+    print(f"Found {len(input_urls)} collection URLs", flush=True)
     if not input_urls:
-        print("No input URLs found in", INPUT_FILE)
+        print("No input URLs found in", INPUT_FILE, flush=True)
         report["error"] = "No input URLs"
         with open(REPORT_FILE, "w", encoding="utf-8") as f:
             json.dump(report, f, ensure_ascii=False, indent=2)
         return
     all_valid = []
     per_url_status = []
-    for url in input_urls:
+    for i, url in enumerate(input_urls):
+        print(f"[{i+1}/{len(input_urls)}] Processing: {url}", flush=True)
         status = {"url": url, "success": False, "count": 0, "error": None}
         try:
             text = fetch_text(url)
@@ -108,25 +107,29 @@ def main():
                 status["success"] = True
                 status["count"] = len(valid)
                 all_valid.extend(valid)
+                print(f"  -> Got {len(valid)} valid sources", flush=True)
             else:
                 status["error"] = "Not a list"
+                print(f"  -> Error: Not a list", flush=True)
         except Exception as e:
             status["error"] = str(e)
+            print(f"  -> Error: {e}", flush=True)
         per_url_status.append(status)
     report["collections"] = per_url_status
+    print(f"\nTotal: {len(all_valid)} sources, starting dedup...", flush=True)
     deduped = dedup_sources(all_valid)
-    print(f"Loaded {len(all_valid)} sources, after dedup: {len(deduped)}, testing (10s timeout)...")
+    print(f"After dedup: {len(deduped)} sources, starting availability test (10s timeout)...", flush=True)
     passed = []
     for i, src in enumerate(deduped):
         if test_source_availability(src, timeout=SOURCE_TIMEOUT):
             passed.append(src)
         if (i + 1) % 50 == 0:
-            print(f"Tested {i + 1}/{len(deduped)}, passed: {len(passed)}")
+            print(f"Tested {i + 1}/{len(deduped)}, passed: {len(passed)}", flush=True)
     report["tested"] = len(deduped)
     report["passed"] = len(passed)
     report["final_count"] = len(passed)
     if len(passed) == 0:
-        print("No valid sources after test, keeping old files.")
+        print("No valid sources after test, keeping old files.", flush=True)
         with open(REPORT_FILE, "w", encoding="utf-8") as f:
             json.dump(report, f, ensure_ascii=False, indent=2)
         return
@@ -134,7 +137,7 @@ def main():
         json.dump(passed, f, ensure_ascii=False, indent=2)
     with open(REPORT_FILE, "w", encoding="utf-8") as f:
         json.dump(report, f, ensure_ascii=False, indent=2)
-    print(f"Tested: {len(deduped)}, Passed: {len(passed)}")
+    print(f"\nDone! Tested: {len(deduped)}, Passed: {len(passed)}", flush=True)
 
 if __name__ == "__main__":
     main()
