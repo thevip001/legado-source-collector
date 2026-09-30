@@ -1,6 +1,0 @@
-# 在此文件中每行填写一个 Yiove 书源合集导出链接
-# 以 # 开头的行为注释，会被忽略
-
-https://shuyuan-api.yiove.com/import/book-source-collection/f3f55c6e-723b-4055-b254-124c9d88c5cb
-https://shuyuan-api.yiove.com/import/book-source-collection/a8adf570-e115-4b99-87e3-ccaf298ae361
-https://shuyuan-api.yiove.com/import/book-source-collection/06626937-970d-4936-8fd1-8f4ecbbd64f9
