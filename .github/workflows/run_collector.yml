@@ -1,12 +1,12 @@
 name: Run Source Collector
 
 on:
-  workflow_dispatch:  # 手动触发
+  workflow_dispatch:
   schedule:
-    - cron: '0 0 * * 0'  # 每周日 UTC 0 点自动运行
+    - cron: '0 0 * * 0' # 每周日 UTC 00:00（北京时间 08:00）
 
 permissions:
-  contents: write  # 允许推送代码到仓库
+  contents: write
 
 jobs:
   collect-and-validate:
@@ -26,37 +26,47 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run source collector
+      - name: Collect and validate sources
         run: python legado_source_collector.py
 
-      - name: Upload artifacts
+      - name: Check generated source count
+        run: |
+          python - <<'PY'
+          import json
+          with open('valid_sources.json', encoding='utf-8') as f:
+              sources = json.load(f)
+          if not isinstance(sources, list) or not sources:
+              raise SystemExit('valid_sources.json is empty; refusing to publish')
+          print(f'Validated {len(sources)} importable sources')
+          PY
+
+      - name: Upload generated source files
         uses: actions/upload-artifact@v4
         with:
           name: sources_output
           path: |
             valid_sources.json
+            pending_sources.json
             invalid_sources.json
           retention-days: 30
 
-      - name: Commit and push to output branch
+      - name: Commit latest files to output branch
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          
-          # 保存生成的文件到临时目录
           mkdir -p /tmp/sources_output
-          cp valid_sources.json invalid_sources.json /tmp/sources_output/
-          
-          # 切换到 output 分支（只保留书源文件）
+          cp valid_sources.json pending_sources.json invalid_sources.json /tmp/sources_output/
           git fetch origin
-          git checkout -B output || git checkout --orphan output
-          git rm -rf . 2>/dev/null || true
-          
-          # 从临时目录复制回来
-          cp /tmp/sources_output/valid_sources.json /tmp/sources_output/invalid_sources.json ./
-          
-          git add valid_sources.json invalid_sources.json
-          git commit -m "Auto-update sources: $(date -u +%Y-%m-%d)" || echo "No changes to commit"
-          git push -f origin output
+          if git show-ref --verify --quiet refs/remotes/origin/output; then
+            git checkout -B output origin/output
+          else
+            git checkout --orphan output
+            git rm -rf . 2>/dev/null || true
+          fi
+          rm -f valid_sources.json pending_sources.json invalid_sources.json
+          cp /tmp/sources_output/valid_sources.json /tmp/sources_output/pending_sources.json /tmp/sources_output/invalid_sources.json ./
+          git add valid_sources.json pending_sources.json invalid_sources.json
+          git commit -m "Auto-update sources: $(date -u +%Y-%m-%dT%H:%M:%SZ)" || echo "No changes to commit"
+          git push origin output
